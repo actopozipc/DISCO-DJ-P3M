@@ -1,3 +1,5 @@
+<a href="https://ascl.net/2510.026"><img src="https://img.shields.io/badge/ascl-2510.026-blue.svg?colorB=262255" alt="ascl:2510.026" /></a>
+
 # DISCO-DJ: DIfferentiable Simulations for COsmology - Done with Jax
 <img src="src/logo/logo.png" width="800"/>
 
