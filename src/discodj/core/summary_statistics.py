@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 import numpy as onp
-from collections.abc import Iterable
 from ..core.grids import get_fourier_grid
 from ..core.utils import set_indices_to_val
 from ..core.types import AnyArray
@@ -10,13 +9,13 @@ from ..core.types import AnyArray
 __all__ = ['power_spectrum', 'cross_power_spectrum']
 
 
-def power_spectrum_core(fourier_fields: AnyArray | list[AnyArray], cellsize: float, bins: int | tuple = 16,
+def power_spectrum_core(fourier_fields: AnyArray, cellsize: float, bins: int | tuple = 16,
                         dtype_num: int = 32, compute_std: bool = False, logarithmic: bool = True,
                         k_effective: bool = True, full_shape: bool = False, with_jax: bool = True) \
         -> tuple[AnyArray, AnyArray, AnyArray | None]:
     """Core of the power spectrum calculation.
 
-    :param fourier_fields: complex field (or list of complex fields)
+    :param fourier_fields: complex field
     :param cellsize: size of a single cell in field in Mpc/h
     :param bins: number of bins or alternatively tuple of bin edges
     :param dtype_num: 32 or 64 (float32 or float64)
@@ -32,16 +31,10 @@ def power_spectrum_core(fourier_fields: AnyArray | list[AnyArray], cellsize: flo
     """
     np = jnp if with_jax else onp
     dtype = getattr(jnp, f'float{dtype_num}')
-    if isinstance(fourier_fields, AnyArray):
-        fourier_fields = [fourier_fields]
-        single_field = True
-    elif isinstance(fourier_fields, Iterable):
-        single_field = False
-    else:
-        raise ValueError("fourier_fields must be an array or a list of arrays!")
-    fourier_shape = fourier_fields[0].shape
+    if not isinstance(fourier_fields, AnyArray):
+        raise ValueError("fourier_fields must be an array!")
+    fourier_shape = fourier_fields.shape
     dim = len(fourier_shape)
-    assert onp.all([f.shape == fourier_shape for f in fourier_fields]), "All fields must have the same shape!"
     shape = fourier_shape if full_shape else fourier_shape[:-1] + (fourier_shape[-1] * 2 - 2,)
     assert onp.all([d == shape[0] for d in shape]), \
         "Different resolutions for different dimensions are not yet supported."
@@ -85,7 +78,7 @@ def power_spectrum_core(fourier_fields: AnyArray | list[AnyArray], cellsize: flo
     if onp.prod(shape) <= 2147483647:
         dig = dig.astype('int32')
 
-    rfft_factor = np.ones_like(fourier_fields[0], dtype=int)
+    rfft_factor = np.ones_like(fourier_fields, dtype=int)
     rfft_factor = set_indices_to_val(rfft_factor, (..., slice(1, -1)), 2).reshape(-1)
     
     # count number of modes in each bin
@@ -118,15 +111,7 @@ def power_spectrum_core(fourier_fields: AnyArray | list[AnyArray], cellsize: flo
 
         return P, Pstd
 
-    if with_jax:
-        P, Pstd = jax.vmap(lambda fs: _get_Pk(fs, dig, N_modes), in_axes=0, out_axes=0)(np.asarray(fourier_fields))
-    else:
-        P, Pstd = zip(*[_get_Pk(f, dig, N_modes) for f in fourier_fields])
-
-    if single_field:
-        P = P[0]
-        if compute_std:
-            Pstd = Pstd[0]
+    P, Pstd = _get_Pk(np.asarray(fourier_fields), dig, N_modes)
 
     return kbins, P, Pstd
 
