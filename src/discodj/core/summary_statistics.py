@@ -31,8 +31,6 @@ def power_spectrum_core(fourier_fields: AnyArray, cellsize: float, bins: int | t
     """
     np = jnp if with_jax else onp
     dtype = getattr(jnp, f'float{dtype_num}')
-    if not isinstance(fourier_fields, AnyArray):
-        raise ValueError("fourier_fields must be an array!")
     fourier_shape = fourier_fields.shape
     dim = len(fourier_shape)
     shape = fourier_shape if full_shape else fourier_shape[:-1] + (fourier_shape[-1] * 2 - 2,)
