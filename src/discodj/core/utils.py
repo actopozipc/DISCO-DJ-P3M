@@ -365,3 +365,53 @@ def rk4_integrate(func, y0, t_array) -> Array:
     # Perform scan
     _, y_values = jax.lax.scan(rk4_step, (y0, t_array[0]), t_array[1:])
     return jnp.concatenate([y0[None, :], y_values])  # Include initial condition
+
+def z_order_encode(pos: jax.Array, boxsize: float, optimize_bits: bool = True):
+    #find out whats the maximum bitsize to interleave bits (e.g 21 bits -> 63 bit moton)
+    #if I normalize pos -> they will always have the same bits
+    #but what if all positions are close to each other and I dont need the maximum bits?
+    max_bits = 21
+    norm_pos = pos / boxsize #normalize to [0,1) -> could I overwrite pos here? Is this memory efficient?
+
+    if optimize_bits:
+        max_pos = jnp.max(norm_pos) #maximum normalized value
+        max_bits = jnp.ceil(jnp.log2(max_val * (1 << (max_bits-1)))).astype(int)
+    #check if length of pos is 3, 2 or 1d -> encode_3d,2d or 1d
+    dim = pos.shape[-1]
+    if dim == 3:
+        return z_order_encode_3d(norm_pos, max_bits)
+    elif dim == 2:
+        return z_order_encode_2d(norm_pos, max_bits)
+    elif dim == 1:
+        return z_order_encode_1d(norm_pos, max_bits)
+    else:
+        #this should be done way earlier in the simulation, right? there is the assert in disco dj
+        #anyway my code reviewe at work would kill me if I wouldnt check and its no computationally extracost
+        raise ValueError("Only 1D, 2D, and 3D simulations are supported.")
+    pass
+def _split_bits(x: jax.Array, max_bits: int) -> jax.Array:
+    return ((x[..., None] >> jnp.arange(max_bits)) & 1).astype(jnp.uint32) #should I use dtype_c here?
+def z_order_encode_3d(pos: jax.Array, max_bits: int):
+    x, y, z = (jnp.floor(pos[..., i] * (1 << max_bits)).astype(jnp.uint32) for i in range(3))
+    x_bits = _split_bits(x, max_bits)
+    y_bits = _split_bits(y, max_bits)
+    z_bits = _split_bits(z, max_bits)
+    z_order = jnp.zeros(x_bits.shape[:-1], dtype=jnp.uint64) #dtype_uc here?
+    for i in range(max_bits):
+        z_order |= (x_bits[..., i] << (3*i))
+        z_order |= (y_bits[..., i] << (3*i + 1))
+        z_order |= (z_bits[..., i] << (3*i + 2))
+    return z_order
+def z_order_encode_2d(pos: jax.Array, max_bits: int):
+    x, y = (jnp.floor(pos[..., i] * (1 << max_bits)).astype(jnp.uint32) for i in range(2))
+    x_bits = _split_bits(x, max_bits)
+    y_bits = _split_bits(y, max_bits)
+    z_bits = _split_bits(z, max_bits)
+    z_order = jnp.zeros(x_bits.shape[:-1], dtype=jnp.uint64) #dtype_uc here?
+    for i in range(max_bits):
+        z_order |= (x_bits[..., i] << (2*i))
+        z_order |= (y_bits[..., i] << (2*i + 1))
+    return z_order
+def z_order_encode_1d(pos: jax.Array, max_bits: int):
+    x = jnp.floor(pos[..., 0] * (1 << max_bits)).astype(jnp.uint64) #dtype_uc here?
+    return x
