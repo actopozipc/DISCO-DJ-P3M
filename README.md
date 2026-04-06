@@ -12,10 +12,12 @@ test it lol
 # Questions
 ## z-order
 is
-   norm_pos = pos / boxsize
+
+      norm_pos = pos / boxsize
 
 good for memory? Should I just overwrite norm_pos?
 How do I receive the precision from the disco_dj object? Do I need to adapt the bit convert to the dtype_num and dtype_c_num?
-   z_order = jnp.zeros(x_bits.shape[:-1], dtype=jnp.uint64)
+
+      z_order = jnp.zeros(x_bits.shape[:-1], dtype=jnp.uint64)
 
    
