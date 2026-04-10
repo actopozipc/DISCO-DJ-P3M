@@ -415,3 +415,8 @@ def z_order_encode_2d(pos: jax.Array, max_bits: int):
 def z_order_encode_1d(pos: jax.Array, max_bits: int):
     x = jnp.floor(pos[..., 0] * (1 << max_bits)).astype(jnp.uint64) #dtype_uc here?
     return x
+def sort_by_morton(z_order_vec: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    sorted_by_z_order = jnp.argsort(z_order_vec)
+    sorted_z_order_vec = z_order_vec[sorted_by_z_order]
+    original_indices = jnp.argsort(sorted_by_z_order)  #this contains original order again
+    return sorted_z_order_vec, sorted_by_z_order, original_indices
