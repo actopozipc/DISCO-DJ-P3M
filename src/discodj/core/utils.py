@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from collections.abc import Callable
 from ..core.types import AnyArray
 from jax import Array
-
+from typing import Tuple
 __all__ = ['is_jax_object', 'scan_fct_np', 'set_indices_to_val', 'add_to_indices', 'set_0_to_val',
            'set_row_or_col_to_val', 'get_indices_for_pad_and_crop', 'crop', 'pad', 'conv2_fourier',
            'preprocess_fixed_inds']
@@ -365,3 +365,112 @@ def rk4_integrate(func, y0, t_array) -> Array:
     # Perform scan
     _, y_values = jax.lax.scan(rk4_step, (y0, t_array[0]), t_array[1:])
     return jnp.concatenate([y0[None, :], y_values])  # Include initial condition
+@jax.jit(static_argnames=["max_bits"])
+def z_order_encode(pos: jax.Array, boxsize: float, optimize_bits: bool = True, max_bits=21):
+    #find out whats the maximum bitsize to interleave bits (e.g 21 bits -> 63 bit moton)
+    #if I normalize pos -> they will always have the same bits
+    #but what if all positions are close to each other and I dont need the maximum bits?
+    # max_bits = 21 somehow setting this value in function throws error
+    norm_pos = pos / boxsize #normalize to [0,1) -> could I overwrite pos here? Is this memory efficient?
+
+    if False:#optimize_bits: TracerBoolConversionError? 
+        max_pos = jnp.max(norm_pos) #maximum normalized value
+        max_bits = jnp.ceil(jnp.log2(max_pos * (1 << (max_bits-1)))).astype(int)
+    #check if length of pos is 3, 2 or 1d -> encode_3d,2d or 1d
+    dim = pos.shape[-1]
+    if dim == 3:
+        return z_order_encode_3d(norm_pos, max_bits)
+    elif dim == 2:
+        return z_order_encode_2d(norm_pos, max_bits)
+    elif dim == 1:
+        return z_order_encode_1d(norm_pos, max_bits)
+    else:
+        #this should be done way earlier in the simulation, right? there is the assert in disco dj
+        #anyway my code reviewe at work would kill me if I wouldnt check and its no computationally extracost
+        raise ValueError("Only 1D, 2D, and 3D simulations are supported.")
+    pass
+def _split_bits(x: jax.Array, max_bits: int) -> jax.Array:
+    return ((x[..., None] >> jnp.arange(max_bits)) & 1).astype(jnp.uint32) #should I use dtype_c here?
+def z_order_encode_3d(pos: jax.Array, max_bits: int):
+    x, y, z = (jnp.floor(pos[..., i] * (1 << max_bits)).astype(jnp.uint32) for i in range(3))
+    x_bits = _split_bits(x, max_bits)
+    y_bits = _split_bits(y, max_bits)
+    z_bits = _split_bits(z, max_bits)
+    z_order = jnp.zeros(x_bits.shape[:-1], dtype=jnp.uint64) #dtype_uc here?
+    for i in range(max_bits):
+        z_order |= (x_bits[..., i] << (3*i))
+        z_order |= (y_bits[..., i] << (3*i + 1))
+        z_order |= (z_bits[..., i] << (3*i + 2))
+    return z_order
+def z_order_encode_2d(pos: jax.Array, max_bits: int):
+    x, y = (jnp.floor(pos[..., i] * (1 << max_bits)).astype(jnp.uint32) for i in range(2))
+    x_bits = _split_bits(x, max_bits)
+    y_bits = _split_bits(y, max_bits)
+    z_bits = _split_bits(z, max_bits)
+    z_order = jnp.zeros(x_bits.shape[:-1], dtype=jnp.uint64) #dtype_uc here?
+    for i in range(max_bits):
+        z_order |= (x_bits[..., i] << (2*i))
+        z_order |= (y_bits[..., i] << (2*i + 1))
+    return z_order
+def z_order_encode_1d(pos: jax.Array, max_bits: int):
+    x = jnp.floor(pos[..., 0] * (1 << max_bits)).astype(jnp.uint64) #dtype_uc here?
+    return x
+def sort_by_z_order(z_order_vec: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    sorted_by_z_order = jnp.argsort(z_order_vec)
+    sorted_z_order_vec = z_order_vec[sorted_by_z_order]
+    original_indices = jnp.argsort(sorted_by_z_order)  #this contains original order again
+    return sorted_z_order_vec, sorted_by_z_order, original_indices
+
+def scan(carry, xs, sorted_pos):
+        i = xs[0]
+        window_size = xs[1]
+        n_particles = sorted_pos.shape[0]
+        max_neighbors = window_size * 2
+        pos_i = sorted_pos[i]
+        start = jnp.maximum(0, i - window_size)
+        end = jnp.minimum(n_particles, i + window_size + 1)
+        #sorted_pos is here ORIGINAL positions and not z order indices!
+        print(sorted_pos.shape)
+        window = jax.lax.dynamic_slice(sorted_pos, (start, 0), (end - start, 3))
+        diff = window - pos_i
+        #periodic boundary condition, is this always true? does disco dj have other options?
+        diff = jnp.where(diff > boxsize / 2, diff - boxsize, diff)
+        diff = jnp.where(diff < -boxsize / 2, diff + boxsize, diff)
+        dist_sq = jnp.sum(diff ** 2, axis=1)
+
+        #distance filter
+        mask = (dist_sq < r_cut ** 2) & (dist_sq > 0)
+        valid_indices = jnp.where(mask, jnp.arange(start, end), -1)
+        #remove padding
+        valid_indices = valid_indices[valid_indices != -1]
+
+        #create neighbor list
+        n_valid = jnp.minimum(len(valid_indices), max_neighbors)
+        neighbor_indices_i = jnp.pad(
+            valid_indices[:max_neighbors],
+            (0, max_neighbors - n_valid),
+            constant_values=-1,
+        )
+        neighbor_counts_i = n_valid
+
+        return carry, (neighbor_indices_i, neighbor_counts_i)
+
+
+def calculate_neighbours(sorted_pos: jnp.ndarray, r_cut: float,boxsize: float,window_size: int = 32) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    n_particles = sorted_pos.shape[0]
+    max_neighbors = window_size * 2
+    neighbor_indices = jnp.full((n_particles, max_neighbors), -1, dtype=jnp.int32)
+    neighbor_counts = jnp.zeros(n_particles, dtype=jnp.int32)
+    xs = (
+    jnp.arange(n_particles),
+    jnp.full((n_particles,), window_size)  # this tuple full is the solution to ValueError: scan got value with no leading axis to scan over: 32. -> scan needs arrays
+    ) #one has to pass everything in an tuple or otherwise it throws ValueError: scan got length argument of 32 which disagrees with leading axis sizes [2097152].
+
+    _, (neighbor_indices, neighbor_counts) = jax.lax.scan(
+        scan,
+        None,
+        xs,
+        sorted_pos
+    )
+
+    return neighbor_indices, neighbor_counts
