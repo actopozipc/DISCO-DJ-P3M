@@ -365,7 +365,7 @@ def rk4_integrate(func, y0, t_array) -> Array:
     # Perform scan
     _, y_values = jax.lax.scan(rk4_step, (y0, t_array[0]), t_array[1:])
     return jnp.concatenate([y0[None, :], y_values])  # Include initial condition
-@jax.jit(static_argnames=["max_bits"])
+
 def z_order_encode(pos: jax.Array, boxsize: float, optimize_bits: bool = True, max_bits=21):
     #find out whats the maximum bitsize to interleave bits (e.g 21 bits -> 63 bit moton)
     #if I normalize pos -> they will always have the same bits
@@ -421,17 +421,17 @@ def sort_by_z_order(z_order_vec: jnp.ndarray) -> Tuple[jnp.ndarray, jnp.ndarray,
     original_indices = jnp.argsort(sorted_by_z_order)  #this contains original order again
     return sorted_z_order_vec, sorted_by_z_order, original_indices
 
-def scan(carry, xs, sorted_pos):
-        i = xs[0]
-        window_size = xs[1]
+def scan(carry, i, sorted_pos,r_cut, boxsize,window_size):
         n_particles = sorted_pos.shape[0]
         max_neighbors = window_size * 2
-        pos_i = sorted_pos[i]
         start = jnp.maximum(0, i - window_size)
-        end = jnp.minimum(n_particles, i + window_size + 1)
+        # Somehow end = jnp.minimum(n_particles, i + window_size + 1) throws yet another error:TypeError("Only scalar arrays can be converted to Python scalars; " 
+
+        slice_size = max_neighbors + 1
         #sorted_pos is here ORIGINAL positions and not z order indices!
-        print(sorted_pos.shape)
-        window = jax.lax.dynamic_slice(sorted_pos, (start, 0), (end - start, 3))
+        #print(sorted_pos.shape) dont print in jax zzzz
+        window = jax.lax.dynamic_slice(sorted_pos, (start, 0), (slice_size, sorted_pos.shape[-1]))        
+        pos_i = sorted_pos[i]
         diff = window - pos_i
         #periodic boundary condition, is this always true? does disco dj have other options?
         diff = jnp.where(diff > boxsize / 2, diff - boxsize, diff)
@@ -440,18 +440,11 @@ def scan(carry, xs, sorted_pos):
 
         #distance filter
         mask = (dist_sq < r_cut ** 2) & (dist_sq > 0)
-        valid_indices = jnp.where(mask, jnp.arange(start, end), -1)
-        #remove padding
-        valid_indices = valid_indices[valid_indices != -1]
-
-        #create neighbor list
-        n_valid = jnp.minimum(len(valid_indices), max_neighbors)
-        neighbor_indices_i = jnp.pad(
-            valid_indices[:max_neighbors],
-            (0, max_neighbors - n_valid),
-            constant_values=-1,
-        )
-        neighbor_counts_i = n_valid
+        # I had a previous solution where I created an array of -1 and overwrote it with the actual indices but somehow this was very slow
+        global_indices = jnp.arange(slice_size) + start
+    
+        neighbor_indices_i = jnp.where(mask, global_indices, -1)
+        neighbor_counts_i = jnp.sum(mask)
 
         return carry, (neighbor_indices_i, neighbor_counts_i)
 
@@ -461,16 +454,16 @@ def calculate_neighbours(sorted_pos: jnp.ndarray, r_cut: float,boxsize: float,wi
     max_neighbors = window_size * 2
     neighbor_indices = jnp.full((n_particles, max_neighbors), -1, dtype=jnp.int32)
     neighbor_counts = jnp.zeros(n_particles, dtype=jnp.int32)
-    xs = (
-    jnp.arange(n_particles),
-    jnp.full((n_particles,), window_size)  # this tuple full is the solution to ValueError: scan got value with no leading axis to scan over: 32. -> scan needs arrays
-    ) #one has to pass everything in an tuple or otherwise it throws ValueError: scan got length argument of 32 which disagrees with leading axis sizes [2097152].
-
+    # xs = (
+    # jnp.arange(n_particles),
+    # jnp.full((n_particles,), window_size)  # this tuple full is the solution to ValueError: scan got value with no leading axis to scan over: 32. -> scan needs arrays
+    # ) #one has to pass everything in an tuple or otherwise it throws ValueError: scan got length argument of 32 which disagrees with leading axis sizes [2097152].
+    #actually, the tuple solution threw another error of how something cant be traced
+    xs = jnp.arange(n_particles)
     _, (neighbor_indices, neighbor_counts) = jax.lax.scan(
-        scan,
+        lambda carry, i: scan(carry, i, sorted_pos, r_cut, boxsize, window_size),
         None,
-        xs,
-        sorted_pos
+        xs
     )
 
     return neighbor_indices, neighbor_counts
